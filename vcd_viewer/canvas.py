@@ -4,6 +4,7 @@ Handles rendering of waveforms on a Tkinter canvas
 """
 
 import tkinter as tk
+import re
 
 
 class WaveformCanvas:
@@ -56,6 +57,16 @@ class WaveformCanvas:
 
         self.canvas.config(bg=self.colors["background"])
 
+        # Mouse drag state for panning
+        self.drag_start_x = None
+        self.drag_start_y = None
+        self.is_dragging = False
+
+        # Bind mouse events for panning
+        self.canvas.bind("<ButtonPress-1>", self._on_mouse_down)
+        self.canvas.bind("<B1-Motion>", self._on_mouse_drag)
+        self.canvas.bind("<ButtonRelease-1>", self._on_mouse_up)
+
     def pack(self, **kwargs):
         """Pack the frame"""
         self.frame.pack(**kwargs)
@@ -71,13 +82,27 @@ class WaveformCanvas:
         visible_signals = [s for s in signals if s.visible]
 
         if not visible_signals:
+            # Draw message when no signals are selected
+            self.canvas.create_text(
+                self.canvas.winfo_width() // 2,
+                self.canvas.winfo_height() // 2,
+                text="No signals selected\n\nSelect signals from the list on the left",
+                fill=self.colors["text"],
+                font=("Arial", 12),
+                justify=tk.CENTER,
+            )
             return
 
-        # Calculate canvas size
+        # Calculate canvas size with bounds checking
         max_time = self.waveform_data.max_timestamp
-        canvas_width = int(max_time * self.time_scale) + self.left_margin + 100
-        canvas_height = (
-            len(visible_signals) * (self.signal_height + self.signal_spacing) + 100
+        if max_time <= 0:
+            return
+
+        canvas_width = max(
+            200, int(max_time * self.time_scale) + self.left_margin + 100
+        )
+        canvas_height = max(
+            100, len(visible_signals) * (self.signal_height + self.signal_spacing) + 100
         )
 
         self.canvas.config(scrollregion=(0, 0, canvas_width, canvas_height))
@@ -109,9 +134,10 @@ class WaveformCanvas:
                 x, 0, x, height, fill=self.colors["grid"], dash=(2, 4)
             )
 
-            # Time label
+            # Time label with units
+            time_label = self._format_time_with_units(t)
             self.canvas.create_text(
-                x, 20, text=str(t), fill=self.colors["text"], font=("Courier", 8)
+                x, 20, text=time_label, fill=self.colors["text"], font=("Courier", 8)
             )
 
             t += time_step
@@ -133,6 +159,60 @@ class WaveformCanvas:
                 return step * magnitude
 
         return magnitude * 10
+
+    def _format_time_with_units(self, time_value):
+        """Format time value with appropriate units and remove trailing zeros"""
+        # Parse the timescale from waveform_data
+        timescale = self.waveform_data.timescale
+
+        # Extract base unit and multiplier (e.g., "1ns" -> 1, "ns")
+        match = re.match(r"(\d+)\s*(\w+)", timescale)
+        if not match:
+            return str(int(time_value))
+
+        multiplier = int(match.group(1))
+        base_unit = match.group(2)
+
+        # Calculate actual time in base units
+        actual_time = time_value * multiplier
+
+        # Define unit conversions (in ascending order)
+        units = {
+            "fs": 1e-15,
+            "ps": 1e-12,
+            "ns": 1e-9,
+            "us": 1e-6,
+            "ms": 1e-3,
+            "s": 1,
+        }
+
+        # Get the base unit value
+        if base_unit not in units:
+            return str(int(time_value))
+
+        base_value = units[base_unit]
+        time_in_seconds = actual_time * base_value
+
+        # Find the most appropriate unit
+        best_unit = base_unit
+        best_value = actual_time
+
+        for unit, factor in sorted(units.items(), key=lambda x: x[1], reverse=True):
+            converted = time_in_seconds / factor
+            if converted >= 1.0:
+                best_unit = unit
+                best_value = converted
+                break
+
+        # Format the value, removing trailing zeros and decimal point if not needed
+        if best_value == int(best_value):
+            formatted = f"{int(best_value)}{best_unit}"
+        else:
+            # Remove trailing zeros after decimal
+            formatted = f"{best_value:.10f}".rstrip("0").rstrip(".")
+            formatted = f"{formatted}{best_unit}"
+
+        return formatted
 
     def _draw_signal(self, signal, y_offset):
         """Draw a single signal waveform"""
@@ -300,3 +380,59 @@ class WaveformCanvas:
         """Set the time scale (zoom)"""
         self.time_scale = scale
         self.draw_waveforms()
+
+    def _on_mouse_down(self, event):
+        """Handle mouse button press for panning"""
+        self.canvas.config(cursor="fleur")  # Change cursor to indicate dragging
+        self.drag_start_x = event.x
+        self.drag_start_y = event.y
+        self.is_dragging = True
+
+    def _on_mouse_drag(self, event):
+        """Handle mouse drag for panning"""
+        if (
+            not self.is_dragging
+            or self.drag_start_x is None
+            or self.drag_start_y is None
+        ):
+            return
+
+        # Calculate delta
+        dx = event.x - self.drag_start_x
+        dy = event.y - self.drag_start_y
+
+        # Get current view
+        x_view = self.canvas.xview()
+        y_view = self.canvas.yview()
+
+        # Calculate scroll amounts (inverted for natural dragging)
+        scroll_region = self.canvas.cget("scrollregion")
+        if scroll_region:
+            scroll_coords = [float(x) for x in scroll_region.split()]
+            if len(scroll_coords) == 4:
+                total_width = scroll_coords[2] - scroll_coords[0]
+                total_height = scroll_coords[3] - scroll_coords[1]
+                canvas_width = self.canvas.winfo_width()
+                canvas_height = self.canvas.winfo_height()
+
+                # Only scroll if content is larger than viewport
+                if total_width > canvas_width and canvas_width > 0:
+                    x_scroll = -dx / total_width
+                    new_x = max(0.0, min(1.0, x_view[0] + x_scroll))
+                    self.canvas.xview_moveto(new_x)
+
+                if total_height > canvas_height and canvas_height > 0:
+                    y_scroll = -dy / total_height
+                    new_y = max(0.0, min(1.0, y_view[0] + y_scroll))
+                    self.canvas.yview_moveto(new_y)
+
+        # Update start position for next drag event
+        self.drag_start_x = event.x
+        self.drag_start_y = event.y
+
+    def _on_mouse_up(self, event):
+        """Handle mouse button release"""
+        self.canvas.config(cursor="")  # Reset cursor
+        self.drag_start_x = None
+        self.drag_start_y = None
+        self.is_dragging = False

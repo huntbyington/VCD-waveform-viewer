@@ -21,6 +21,8 @@ class WaveformViewer:
         self.waveform_data = WaveformData()
         self.parser = VCDParser()
         self.canvas = None
+        self.signal_listbox = None
+        self.search_var = None
 
         self._create_menu()
         self._create_toolbar()
@@ -103,10 +105,61 @@ class WaveformViewer:
         ).pack(side=tk.LEFT, padx=2, pady=2)
 
     def _create_main_area(self):
-        """Create main display area with canvas"""
-        # Create canvas (initially with empty data)
-        self.canvas = WaveformCanvas(self.root, self.waveform_data)
-        self.canvas.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+        """Create main display area with canvas and signal list"""
+        # Create main paned window for split view
+        main_paned = tk.PanedWindow(self.root, orient=tk.HORIZONTAL)
+        main_paned.pack(fill=tk.BOTH, expand=True)
+
+        # Left panel - Signal list
+        left_frame = tk.Frame(main_paned, width=250)
+        main_paned.add(left_frame)
+
+        # Signal list label
+        tk.Label(left_frame, text="Signals", font=("Arial", 10, "bold")).pack(pady=5)
+
+        # Search box
+        search_frame = tk.Frame(left_frame)
+        search_frame.pack(fill=tk.X, padx=5, pady=5)
+        tk.Label(search_frame, text="Search:").pack(side=tk.LEFT)
+        self.search_var = tk.StringVar()
+        self.search_var.trace("w", self._on_search)
+        tk.Entry(search_frame, textvariable=self.search_var).pack(
+            side=tk.LEFT, fill=tk.X, expand=True, padx=5
+        )
+
+        # Listbox with scrollbar
+        list_frame = tk.Frame(left_frame)
+        list_frame.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+
+        scrollbar = tk.Scrollbar(list_frame)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+
+        self.signal_listbox = tk.Listbox(
+            list_frame, selectmode=tk.MULTIPLE, yscrollcommand=scrollbar.set
+        )
+        self.signal_listbox.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        scrollbar.config(command=self.signal_listbox.yview)
+
+        self.signal_listbox.bind("<<ListboxSelect>>", self._on_signal_select)
+
+        # Buttons for selection
+        btn_frame = tk.Frame(left_frame)
+        btn_frame.pack(fill=tk.X, padx=5, pady=5)
+
+        tk.Button(btn_frame, text="Select All", command=self._select_all_signals).pack(
+            side=tk.LEFT, padx=2
+        )
+        tk.Button(btn_frame, text="Clear All", command=self._clear_all_signals).pack(
+            side=tk.LEFT, padx=2
+        )
+
+        # Right panel - Canvas
+        right_frame = tk.Frame(main_paned)
+        main_paned.add(right_frame)
+
+        # Create canvas
+        self.canvas = WaveformCanvas(right_frame, self.waveform_data)
+        self.canvas.pack(fill=tk.BOTH, expand=True)
 
     def _create_status_bar(self):
         """Create status bar at bottom"""
@@ -158,6 +211,9 @@ class WaveformViewer:
                 f"Max Time: {max_time} {self.waveform_data.timescale}",
             )
 
+            # Populate signal listbox
+            self._populate_signal_list()
+
         except FileNotFoundError:
             messagebox.showerror("Error", f"File not found: {filename}")
             self.status_bar.config(text="Error: File not found")
@@ -180,19 +236,32 @@ class WaveformViewer:
 
     def zoom_in(self):
         """Zoom in (increase time scale)"""
-        if self.canvas:
+        if self.canvas and self.waveform_data.max_timestamp > 0:
             self.canvas.time_scale *= 1.5
             self.canvas.draw_waveforms()
-            self.status_bar.config(text=f"Zoom: {self.canvas.time_scale:.2f}x")
+            self.status_bar.config(text=f"Zoom: {self.canvas.time_scale:.4f}x")
 
     def zoom_out(self):
         """Zoom out (decrease time scale)"""
-        if self.canvas:
-            self.canvas.time_scale /= 1.5
-            if self.canvas.time_scale < 0.01:
-                self.canvas.time_scale = 0.01
-            self.canvas.draw_waveforms()
-            self.status_bar.config(text=f"Zoom: {self.canvas.time_scale:.2f}x")
+        if self.canvas and self.waveform_data.max_timestamp > 0:
+            new_scale = self.canvas.time_scale / 1.5
+
+            # Calculate minimum zoom to keep at least 50 pixels for entire timeline
+            # This allows viewing the entire waveform in a reasonable window
+            min_scale = 50.0 / self.waveform_data.max_timestamp
+
+            # Apply the new scale if it's above the minimum
+            if new_scale >= min_scale:
+                self.canvas.time_scale = new_scale
+                self.canvas.draw_waveforms()
+                self.status_bar.config(text=f"Zoom: {self.canvas.time_scale:.6f}x")
+            else:
+                # Set to minimum and show message
+                self.canvas.time_scale = min_scale
+                self.canvas.draw_waveforms()
+                self.status_bar.config(
+                    text=f"Minimum zoom reached ({self.canvas.time_scale:.6f}x)"
+                )
 
     def zoom_fit(self):
         """Zoom to fit all waveforms"""
@@ -218,5 +287,56 @@ class WaveformViewer:
             "• VCD file parsing\n"
             "• Digital and bus signal display\n"
             "• Zoom controls\n"
-            "• Time grid\n",
+            "• Time grid\n"
+            "• Signal selection\n"
+            "• Pan with mouse drag\n",
         )
+
+    def _populate_signal_list(self):
+        """Populate the signal listbox with all signals"""
+        self.signal_listbox.delete(0, tk.END)
+
+        signals = self.waveform_data.get_all_signals()
+        for i, signal in enumerate(signals):
+            self.signal_listbox.insert(tk.END, signal.get_full_name())
+            # Select all by default
+            self.signal_listbox.select_set(i)
+
+    def _on_signal_select(self, event):
+        """Handle signal selection changes"""
+        if not self.waveform_data:
+            return
+
+        # Get selected indices
+        selected_indices = self.signal_listbox.curselection()
+        signals = self.waveform_data.get_all_signals()
+
+        # Update visibility
+        for i, signal in enumerate(signals):
+            signal.visible = i in selected_indices
+
+        # Redraw
+        self.canvas.draw_waveforms()
+
+    def _select_all_signals(self):
+        """Select all signals in the listbox"""
+        self.signal_listbox.select_set(0, tk.END)
+        self._on_signal_select(None)
+
+    def _clear_all_signals(self):
+        """Clear all signal selections"""
+        self.signal_listbox.select_clear(0, tk.END)
+        self._on_signal_select(None)
+
+    def _on_search(self, *args):
+        """Filter signals based on search text"""
+        if not self.waveform_data:
+            return
+
+        search_text = self.search_var.get().lower()
+        self.signal_listbox.delete(0, tk.END)
+
+        signals = self.waveform_data.get_all_signals()
+        for signal in signals:
+            if search_text in signal.get_full_name().lower():
+                self.signal_listbox.insert(tk.END, signal.get_full_name())
