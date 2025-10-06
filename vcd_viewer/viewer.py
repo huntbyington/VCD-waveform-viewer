@@ -71,6 +71,8 @@ class WaveformViewer:
         self.root.bind("<Control-minus>", lambda e: self.zoom_out())
         self.root.bind("<Control-0>", lambda e: self.zoom_fit())
         self.root.bind("<F5>", lambda e: self.refresh_display())
+        self.root.bind("<c>", lambda e: self.toggle_cursor())
+        self.root.bind("<Delete>", lambda e: self.clear_markers())
 
     def _create_toolbar(self):
         """Create toolbar with buttons"""
@@ -103,6 +105,23 @@ class WaveformViewer:
         tk.Button(
             toolbar, text="Refresh", command=self.refresh_display, padx=10, pady=5
         ).pack(side=tk.LEFT, padx=2, pady=2)
+
+        tk.Frame(toolbar, width=20).pack(side=tk.LEFT)  # Spacer
+
+        # Cursor and marker controls
+        tk.Button(
+            toolbar, text="Toggle Cursor", command=self.toggle_cursor, padx=10, pady=5
+        ).pack(side=tk.LEFT, padx=2, pady=2)
+
+        tk.Button(
+            toolbar, text="Clear Markers", command=self.clear_markers, padx=10, pady=5
+        ).pack(side=tk.LEFT, padx=2, pady=2)
+
+        # Delta display
+        self.delta_label = tk.Label(
+            toolbar, text="", fg="yellow", font=("Courier", 10, "bold")
+        )
+        self.delta_label.pack(side=tk.RIGHT, padx=10)
 
     def _create_main_area(self):
         """Create main display area with canvas and signal list"""
@@ -214,6 +233,11 @@ class WaveformViewer:
             # Populate signal listbox
             self._populate_signal_list()
 
+            # Initialize cursor
+            from models import Cursor
+
+            self.waveform_data.cursor = Cursor(0)
+
         except FileNotFoundError:
             messagebox.showerror("Error", f"File not found: {filename}")
             self.status_bar.config(text="Error: File not found")
@@ -239,7 +263,7 @@ class WaveformViewer:
         if self.canvas and self.waveform_data.max_timestamp > 0:
             self.canvas.time_scale *= 1.5
             self.canvas.draw_waveforms()
-            self.status_bar.config(text=f"Zoom: {self.canvas.time_scale:.4f}x")
+            self.status_bar.config(text=f"Zoom: {self.canvas.time_scale:.6f}x")
 
     def zoom_out(self):
         """Zoom out (decrease time scale)"""
@@ -332,6 +356,52 @@ class WaveformViewer:
         """Filter signals based on search text"""
         if not self.waveform_data:
             return
+
+        search_text = self.search_var.get().lower()
+
+        # Save currently selected signals before clearing listbox
+        selected_signals = set()
+        signals = self.waveform_data.get_all_signals()
+        for i in self.signal_listbox.curselection():
+            if i < len(signals):
+                selected_signals.add(signals[i].get_full_name())
+
+        self.signal_listbox.delete(0, tk.END)
+
+        # Re-populate with filtered signals and restore selections
+        for signal in signals:
+            if search_text in signal.get_full_name().lower():
+                idx = self.signal_listbox.size()
+                self.signal_listbox.insert(tk.END, signal.get_full_name())
+                # Re-select if it was previously selected
+                if signal.get_full_name() in selected_signals:
+                    self.signal_listbox.select_set(idx)
+
+    def toggle_cursor(self):
+        """Toggle cursor visibility"""
+        if self.waveform_data.cursor:
+            self.waveform_data.cursor.visible = not self.waveform_data.cursor.visible
+            self.canvas.draw_waveforms()
+            status = "visible" if self.waveform_data.cursor.visible else "hidden"
+            self.status_bar.config(text=f"Cursor {status}")
+
+    def clear_markers(self):
+        """Clear all markers"""
+        self.waveform_data.markers.clear()
+        self.canvas.draw_waveforms()
+        self.status_bar.config(text="All markers cleared")
+        self.delta_label.config(text="")
+
+    def update_delta_display(self):
+        """Update the delta display between selected markers"""
+        selected = self.waveform_data.get_selected_markers()
+        if len(selected) >= 2:
+            delta = abs(selected[1].timestamp - selected[0].timestamp)
+            # Format delta with units
+            delta_text = self.canvas._format_time_with_units(delta)
+            self.delta_label.config(text=f"Δ: {delta_text}")
+        else:
+            self.delta_label.config(text="")
 
         search_text = self.search_var.get().lower()
         self.signal_listbox.delete(0, tk.END)
