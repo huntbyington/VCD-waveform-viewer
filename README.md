@@ -184,9 +184,3 @@ MIT License - feel free to use and modify for your projects.
 ## Credits
 
 Created as a tool for digital design verification and debugging.
-
----
-
-**Version**: 1.0  
-**Author**: VCD Viewer Team  
-**Last Updated**: 2025
