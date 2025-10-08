@@ -94,7 +94,12 @@ class WaveformCanvas:
         if not self.waveform_data or not self.waveform_data.signals:
             return
 
-        signals = self.waveform_data.get_all_signals()
+        # Get signals in display order (respects user reordering)
+        if hasattr(self.waveform_data, "get_signals_in_display_order"):
+            signals = self.waveform_data.get_signals_in_display_order()
+        else:
+            signals = self.waveform_data.get_all_signals()
+
         visible_signals = [s for s in signals if s.visible]
 
         if not visible_signals:
@@ -232,19 +237,26 @@ class WaveformCanvas:
         base_value = units[base_unit]
         time_in_seconds = actual_time * base_value
 
-        # Find the most appropriate unit
-        best_unit = base_unit
-        best_value = actual_time
+        # Check if user has selected a specific time base
+        time_base = self.waveform_data.time_base
 
-        for unit, factor in sorted(units.items(), key=lambda x: x[1], reverse=True):
-            converted = time_in_seconds / factor
-            if converted >= 1.0:
-                best_unit = unit
-                best_value = converted
-                break
+        if time_base != "auto" and time_base in units:
+            # Use the user-selected time base
+            best_unit = time_base
+            best_value = time_in_seconds / units[time_base]
+        else:
+            # Auto-select the most appropriate unit
+            best_unit = base_unit
+            best_value = actual_time
+
+            for unit, factor in sorted(units.items(), key=lambda x: x[1], reverse=True):
+                converted = time_in_seconds / factor
+                if converted >= 1.0:
+                    best_unit = unit
+                    best_value = converted
+                    break
 
         # Determine precision based on zoom level
-        # Higher time_scale = more zoomed in = more precision needed
         if self.time_scale >= 100:
             precision = 4  # Very zoomed in
         elif self.time_scale >= 10:
@@ -375,12 +387,12 @@ class WaveformCanvas:
                 if signal.width == 1:
                     # Binary signal - draw as digital waveform
                     self._draw_digital_transition(
-                        prev_x, x, y_high, y_low, prev_value, value
+                        prev_x, x, y_high, y_low, prev_value, value, signal
                     )
                 else:
                     # Bus signal - draw as multi-bit
                     self._draw_bus_transition(
-                        prev_x, x, y_high, y_low, y_mid, prev_value, value
+                        prev_x, x, y_high, y_low, y_mid, prev_value, value, signal
                     )
 
             prev_x = x
@@ -392,13 +404,17 @@ class WaveformCanvas:
                 self.waveform_data.max_timestamp * self.time_scale
             )
             if signal.width == 1:
-                self._draw_digital_value(prev_x, end_x, y_high, y_low, prev_value)
+                self._draw_digital_value(
+                    prev_x, end_x, y_high, y_low, prev_value, signal
+                )
             else:
-                self._draw_bus_value(prev_x, end_x, y_high, y_low, y_mid, prev_value)
+                self._draw_bus_value(
+                    prev_x, end_x, y_high, y_low, y_mid, prev_value, signal
+                )
 
-    def _draw_digital_transition(self, x1, x2, y_high, y_low, old_val, new_val):
+    def _draw_digital_transition(self, x1, x2, y_high, y_low, old_val, new_val, signal):
         """Draw digital signal transition"""
-        color = self._get_signal_color(old_val)
+        color = self._get_signal_color(old_val, signal)
 
         # Horizontal line at old value level
         y_old = y_low if old_val in ["0", "l", "L"] else y_high
@@ -408,15 +424,17 @@ class WaveformCanvas:
         y_new = y_low if new_val in ["0", "l", "L"] else y_high
         self.canvas.create_line(x2, y_old, x2, y_new, fill=color, width=2)
 
-    def _draw_digital_value(self, x1, x2, y_high, y_low, value):
+    def _draw_digital_value(self, x1, x2, y_high, y_low, value, signal):
         """Draw digital signal value"""
-        color = self._get_signal_color(value)
+        color = self._get_signal_color(value, signal)
         y = y_low if value in ["0", "l", "L"] else y_high
         self.canvas.create_line(x1, y, x2, y, fill=color, width=2)
 
-    def _draw_bus_transition(self, x1, x2, y_high, y_low, y_mid, old_val, new_val):
+    def _draw_bus_transition(
+        self, x1, x2, y_high, y_low, y_mid, old_val, new_val, signal
+    ):
         """Draw bus signal transition"""
-        color = self._get_signal_color(new_val)
+        color = signal.color  # Use signal's custom color for buses
 
         # Draw old value
         self.canvas.create_line(x1, y_high, x2 - 5, y_high, fill=color, width=2)
@@ -436,9 +454,9 @@ class WaveformCanvas:
                 font=("Courier", 8),
             )
 
-    def _draw_bus_value(self, x1, x2, y_high, y_low, y_mid, value):
+    def _draw_bus_value(self, x1, x2, y_high, y_low, y_mid, value, signal):
         """Draw bus signal value"""
-        color = self._get_signal_color(value)
+        color = signal.color  # Use signal's custom color for buses
 
         self.canvas.create_line(x1, y_high, x2, y_high, fill=color, width=2)
         self.canvas.create_line(x1, y_low, x2, y_low, fill=color, width=2)
@@ -452,17 +470,16 @@ class WaveformCanvas:
                 font=("Courier", 8),
             )
 
-    def _get_signal_color(self, value):
+    def _get_signal_color(self, value, signal):
         """Get color for signal value"""
-        if value in ["1", "h", "H"]:
-            return self.colors["signal_high"]
-        elif value in ["0", "l", "L"]:
-            return self.colors["signal_low"]
-        elif value in ["x", "X"]:
+        # For special values (x, z), use default colors
+        if value in ["x", "X"]:
             return self.colors["signal_x"]
         elif value in ["z", "Z"]:
             return self.colors["signal_z"]
-        return self.colors["signal_high"]
+
+        # Otherwise use the signal's custom color
+        return signal.color
 
     def _format_bus_value(self, value):
         """Format bus value for display"""

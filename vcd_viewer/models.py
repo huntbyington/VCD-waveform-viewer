@@ -14,6 +14,7 @@ class Signal:
         self.scope = scope  # Hierarchical scope
         self.changes = []  # List of (timestamp, value) tuples
         self.visible = True  # Display flag
+        self.color = "#00ff00"  # Default signal color (green)
 
     def add_change(self, timestamp, value):
         """Add a value change at given timestamp"""
@@ -67,14 +68,16 @@ class WaveformData:
     """Container for all waveform data from VCD file"""
 
     def __init__(self):
-        from models import Cursor  # Import here to avoid circular import
-
         self.timescale = "1ns"  # Time unit
         self.signals = {}  # Dict: identifier -> Signal
         self.markers = []  # List of Markers
         self.max_timestamp = 0  # Maximum time value
         self.scope_hierarchy = {}  # Hierarchical organization
         self.cursor = Cursor(0)  # Initialize cursor
+        self.time_base = (
+            "auto"  # Display time base: "auto", "fs", "ps", "ns", "us", "ms", "s"
+        )
+        self.display_order = []  # List of signal names in display order
 
     def add_signal(self, signal):
         """Add a signal to the data model"""
@@ -90,9 +93,38 @@ class WaveformData:
         """Retrieve signal by its VCD identifier"""
         return self.signals.get(identifier)
 
+    def get_signal_by_name(self, full_name):
+        """Retrieve signal by its full name"""
+        for signal in self.signals.values():
+            if signal.get_full_name() == full_name:
+                return signal
+        return None
+
     def get_all_signals(self):
         """Get list of all signals sorted by scope and name"""
         return sorted(self.signals.values(), key=lambda s: (s.scope, s.name))
+
+    def get_signals_in_display_order(self):
+        """Get signals in the user-specified display order"""
+        if not self.display_order:
+            return self.get_all_signals()
+
+        # Build a dict for quick lookup
+        signal_dict = {s.get_full_name(): s for s in self.signals.values()}
+
+        # Return signals in display order
+        ordered_signals = []
+        for name in self.display_order:
+            if name in signal_dict:
+                ordered_signals.append(signal_dict[name])
+
+        # Add any signals not in display_order at the end
+        ordered_names = set(self.display_order)
+        for signal in self.get_all_signals():
+            if signal.get_full_name() not in ordered_names:
+                ordered_signals.append(signal)
+
+        return ordered_signals
 
     def add_marker(self, marker):
         """Add a time marker"""

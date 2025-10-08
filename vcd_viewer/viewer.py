@@ -23,11 +23,16 @@ class WaveformViewer:
         self.canvas = None
         self.signal_listbox = None
         self.search_var = None
+        self.file_loaded = False
+        self.drag_data = {"index": None, "source": None}
 
         self._create_menu()
         self._create_toolbar()
         self._create_main_area()
         self._create_status_bar()
+
+        # Disable controls until file is loaded
+        self._update_button_states()
 
     def _create_menu(self):
         """Create menu bar"""
@@ -108,14 +113,41 @@ class WaveformViewer:
 
         tk.Frame(toolbar, width=20).pack(side=tk.LEFT)  # Spacer
 
-        # Cursor and marker controls
-        tk.Button(
-            toolbar, text="Toggle Cursor", command=self.toggle_cursor, padx=10, pady=5
-        ).pack(side=tk.LEFT, padx=2, pady=2)
+        # Time base selection
+        tk.Label(toolbar, text="Time Base:").pack(side=tk.LEFT, padx=5)
+        self.time_base_var = tk.StringVar(value="auto")
+        time_base_combo = ttk.Combobox(
+            toolbar,
+            textvariable=self.time_base_var,
+            values=["auto", "fs", "ps", "ns", "us", "ms", "s"],
+            width=6,
+            state="readonly",
+        )
+        time_base_combo.pack(side=tk.LEFT, padx=2)
+        time_base_combo.bind("<<ComboboxSelected>>", self._on_time_base_change)
+        self.time_base_combo = time_base_combo
 
-        tk.Button(
+        tk.Frame(toolbar, width=20).pack(side=tk.LEFT)  # Spacer
+
+        # Cursor and marker controls
+        self.toggle_cursor_btn = tk.Button(
+            toolbar, text="Toggle Cursor", command=self.toggle_cursor, padx=10, pady=5
+        )
+        self.toggle_cursor_btn.pack(side=tk.LEFT, padx=2, pady=2)
+
+        self.clear_markers_btn = tk.Button(
             toolbar, text="Clear Markers", command=self.clear_markers, padx=10, pady=5
-        ).pack(side=tk.LEFT, padx=2, pady=2)
+        )
+        self.clear_markers_btn.pack(side=tk.LEFT, padx=2, pady=2)
+
+        self.delete_marker_btn = tk.Button(
+            toolbar,
+            text="Delete Selected",
+            command=self.delete_selected_markers,
+            padx=10,
+            pady=5,
+        )
+        self.delete_marker_btn.pack(side=tk.LEFT, padx=2, pady=2)
 
         # Delta display
         self.delta_label = tk.Label(
@@ -160,6 +192,14 @@ class WaveformViewer:
         scrollbar.config(command=self.signal_listbox.yview)
 
         self.signal_listbox.bind("<<ListboxSelect>>", self._on_signal_select)
+
+        # Right-click menu for signals
+        self.signal_listbox.bind("<Button-3>", self._show_signal_context_menu)
+
+        # Drag and drop for reordering
+        self.signal_listbox.bind("<ButtonPress-1>", self._on_drag_start)
+        self.signal_listbox.bind("<B1-Motion>", self._on_drag_motion)
+        self.signal_listbox.bind("<ButtonRelease-1>", self._on_drag_release)
 
         # Buttons for selection
         btn_frame = tk.Frame(left_frame)
@@ -238,6 +278,10 @@ class WaveformViewer:
 
             self.waveform_data.cursor = Cursor(0)
 
+            # Enable controls
+            self.file_loaded = True
+            self._update_button_states()
+
         except FileNotFoundError:
             messagebox.showerror("Error", f"File not found: {filename}")
             self.status_bar.config(text="Error: File not found")
@@ -271,7 +315,6 @@ class WaveformViewer:
             new_scale = self.canvas.time_scale / 1.5
 
             # Calculate minimum zoom to keep at least 50 pixels for entire timeline
-            # This allows viewing the entire waveform in a reasonable window
             min_scale = 50.0 / self.waveform_data.max_timestamp
 
             # Apply the new scale if it's above the minimum
@@ -313,7 +356,9 @@ class WaveformViewer:
             "• Zoom controls\n"
             "• Time grid\n"
             "• Signal selection\n"
-            "• Pan with mouse drag\n",
+            "• Pan with mouse drag\n"
+            "• Interactive timing cursors\n"
+            "• Custom signal colors\n",
         )
 
     def _populate_signal_list(self):
@@ -321,8 +366,14 @@ class WaveformViewer:
         self.signal_listbox.delete(0, tk.END)
 
         signals = self.waveform_data.get_all_signals()
+
+        # Initialize display order
+        self.waveform_data.display_order = []
+
         for i, signal in enumerate(signals):
-            self.signal_listbox.insert(tk.END, signal.get_full_name())
+            signal_name = signal.get_full_name()
+            self.signal_listbox.insert(tk.END, signal_name)
+            self.waveform_data.display_order.append(signal_name)
             # Select all by default
             self.signal_listbox.select_set(i)
 
@@ -331,13 +382,19 @@ class WaveformViewer:
         if not self.waveform_data:
             return
 
+        # Get currently displayed signals in listbox
+        displayed_signals = []
+        for i in range(self.signal_listbox.size()):
+            displayed_signals.append(self.signal_listbox.get(i))
+
         # Get selected indices
         selected_indices = self.signal_listbox.curselection()
-        signals = self.waveform_data.get_all_signals()
+        selected_names = set(displayed_signals[i] for i in selected_indices)
 
-        # Update visibility
-        for i, signal in enumerate(signals):
-            signal.visible = i in selected_indices
+        # Update visibility for ALL signals based on their names
+        all_signals = self.waveform_data.get_all_signals()
+        for signal in all_signals:
+            signal.visible = signal.get_full_name() in selected_names
 
         # Redraw
         self.canvas.draw_waveforms()
@@ -363,8 +420,8 @@ class WaveformViewer:
         selected_signals = set()
         signals = self.waveform_data.get_all_signals()
         for i in self.signal_listbox.curselection():
-            if i < len(signals):
-                selected_signals.add(signals[i].get_full_name())
+            if i < self.signal_listbox.size():
+                selected_signals.add(self.signal_listbox.get(i))
 
         self.signal_listbox.delete(0, tk.END)
 
@@ -398,15 +455,207 @@ class WaveformViewer:
         if len(selected) >= 2:
             delta = abs(selected[1].timestamp - selected[0].timestamp)
             # Format delta with units
-            delta_text = self.canvas._format_time_with_units(delta)
+            delta_text = self.canvas._format_time_precise(delta)
             self.delta_label.config(text=f"Δ: {delta_text}")
         else:
             self.delta_label.config(text="")
 
-        search_text = self.search_var.get().lower()
-        self.signal_listbox.delete(0, tk.END)
+    def _update_button_states(self):
+        """Enable/disable buttons based on file loaded state"""
+        state = tk.NORMAL if self.file_loaded else tk.DISABLED
 
-        signals = self.waveform_data.get_all_signals()
-        for signal in signals:
-            if search_text in signal.get_full_name().lower():
-                self.signal_listbox.insert(tk.END, signal.get_full_name())
+        # Toolbar buttons
+        if hasattr(self, "toggle_cursor_btn"):
+            self.toggle_cursor_btn.config(state=state)
+        if hasattr(self, "clear_markers_btn"):
+            self.clear_markers_btn.config(state=state)
+        if hasattr(self, "delete_marker_btn"):
+            self.delete_marker_btn.config(state=state)
+        if hasattr(self, "time_base_combo"):
+            self.time_base_combo.config(
+                state="readonly" if self.file_loaded else "disabled"
+            )
+
+    def _on_time_base_change(self, event=None):
+        """Handle time base selection change"""
+        self.waveform_data.time_base = self.time_base_var.get()
+        self.canvas.draw_waveforms()
+        self.status_bar.config(text=f"Time base: {self.waveform_data.time_base}")
+
+    def _show_signal_context_menu(self, event):
+        """Show right-click context menu for signals"""
+        # Get the clicked item
+        index = self.signal_listbox.nearest(event.y)
+        if index < 0 or index >= self.signal_listbox.size():
+            return
+
+        # Select the item that was right-clicked
+        self.signal_listbox.selection_clear(0, tk.END)
+        self.signal_listbox.selection_set(index)
+
+        signal_name = self.signal_listbox.get(index)
+        signal = self.waveform_data.get_signal_by_name(signal_name)
+
+        if not signal:
+            return
+
+        # Create context menu
+        menu = tk.Menu(self.root, tearoff=0)
+
+        # Color submenu
+        color_menu = tk.Menu(menu, tearoff=0)
+        colors = [
+            ("Green", "#00ff00"),
+            ("Red", "#ff0000"),
+            ("Blue", "#0088ff"),
+            ("Yellow", "#ffff00"),
+            ("Cyan", "#00ffff"),
+            ("Magenta", "#ff00ff"),
+            ("Orange", "#ff8800"),
+            ("White", "#ffffff"),
+            ("Purple", "#8800ff"),
+            ("Light Green", "#88ff88"),
+            ("Light Blue", "#88ccff"),
+        ]
+
+        for color_name, color_value in colors:
+            color_menu.add_command(
+                label=color_name,
+                command=lambda s=signal, c=color_value: self._change_signal_color(s, c),
+            )
+
+        menu.add_cascade(label="Change Color", menu=color_menu)
+        menu.add_separator()
+        menu.add_command(label="Hide Signal", command=lambda: self._hide_signal(signal))
+
+        # Display menu at mouse position
+        try:
+            menu.tk_popup(event.x_root, event.y_root)
+        finally:
+            menu.grab_release()
+
+    def _change_signal_color(self, signal, color):
+        """Change signal display color"""
+        if signal:
+            signal.color = color
+            self.canvas.draw_waveforms()
+            self.status_bar.config(text=f"Changed {signal.get_full_name()} to {color}")
+
+    def _hide_signal(self, signal):
+        """Hide a signal"""
+        if signal:
+            signal.visible = False
+            # Clear selection for this signal in listbox
+            for i in range(self.signal_listbox.size()):
+                if self.signal_listbox.get(i) == signal.get_full_name():
+                    self.signal_listbox.selection_clear(i)
+                    break
+            self.canvas.draw_waveforms()
+            self.status_bar.config(text=f"Hidden {signal.get_full_name()}")
+
+    def _on_drag_start(self, event):
+        """Start drag operation for signal reordering"""
+        # Only start drag if not near the edge (to allow scrolling)
+        widget = event.widget
+        index = widget.nearest(event.y)
+        self.drag_data["index"] = index
+        self.drag_data["source"] = widget.get(index) if index >= 0 else None
+        self.drag_data["start_y"] = event.y
+
+    def _on_drag_motion(self, event):
+        """Handle drag motion"""
+        if self.drag_data["source"] is None:
+            return
+
+        # Only consider it a drag if moved more than 5 pixels
+        if abs(event.y - self.drag_data.get("start_y", 0)) < 5:
+            return
+
+        widget = event.widget
+        index = widget.nearest(event.y)
+
+        # Visual feedback - highlight target position
+        if index >= 0 and index != self.drag_data.get("last_index"):
+            self.drag_data["last_index"] = index
+
+    def _on_drag_release(self, event):
+        """Complete drag operation for signal reordering"""
+        if self.drag_data["source"] is None:
+            return
+
+        widget = event.widget
+        target_index = widget.nearest(event.y)
+        source_index = self.drag_data["index"]
+
+        # Check if this was actually a drag (moved more than 5 pixels)
+        if abs(event.y - self.drag_data.get("start_y", 0)) < 5:
+            # This was a click, not a drag - let selection handle it
+            self.drag_data = {"index": None, "source": None}
+            return
+
+        if target_index >= 0 and source_index >= 0 and source_index != target_index:
+            # Get all current selections
+            selected_indices = list(self.signal_listbox.curselection())
+
+            # Get the item being moved
+            source_item = self.signal_listbox.get(source_index)
+            was_selected = source_index in selected_indices
+
+            # Remove from old position
+            self.signal_listbox.delete(source_index)
+
+            # Adjust target index if necessary
+            if source_index < target_index:
+                target_index -= 1
+
+            # Insert at new position
+            self.signal_listbox.insert(target_index, source_item)
+
+            # Restore selection state
+            if was_selected:
+                self.signal_listbox.selection_set(target_index)
+
+            # Update other selections
+            for idx in selected_indices:
+                if idx != source_index:
+                    # Adjust index based on move
+                    if source_index < idx <= target_index:
+                        new_idx = idx - 1
+                    elif target_index <= idx < source_index:
+                        new_idx = idx + 1
+                    else:
+                        new_idx = idx
+
+                    try:
+                        self.signal_listbox.selection_set(new_idx)
+                    except:
+                        pass
+
+            # Force update of display order and redraw
+            self._update_display_order()
+            self.canvas.draw_waveforms()
+
+        self.drag_data = {"index": None, "source": None}
+
+    def _update_display_order(self):
+        """Update the display order from current listbox state"""
+        new_order = []
+        for i in range(self.signal_listbox.size()):
+            new_order.append(self.signal_listbox.get(i))
+        self.waveform_data.display_order = new_order
+
+        # Verify the order is set correctly
+        test_ordered = self.waveform_data.get_signals_in_display_order()
+        if test_ordered:
+            print(f"TEST: First signal should be: {new_order[0]}")
+            print(f"TEST: First signal actually is: {test_ordered[0].get_full_name()}")
+            print(f"TEST: Match: {new_order[0] == test_ordered[0].get_full_name()}")
+
+    def delete_selected_markers(self):
+        """Delete selected markers"""
+        selected = self.waveform_data.get_selected_markers()
+        for marker in selected:
+            self.waveform_data.remove_marker(marker)
+        self.canvas.draw_waveforms()
+        self.status_bar.config(text=f"Deleted {len(selected)} marker(s)")
+        self.delta_label.config(text="")
