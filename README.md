@@ -173,14 +173,6 @@ vcd_viewer/
 - Use the Time Base dropdown to manually set units
 - Zoom in for more precision, zoom out for less
 
-## Contributing
-
-Feel free to submit issues and enhancement requests.
-
 ## License
 
 MIT License - feel free to use and modify for your projects.
-
-## Credits
-
-Created as a tool for digital design verification and debugging.
